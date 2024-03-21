@@ -1,9 +1,12 @@
 import numpy as np
 import networkx as nx
+from typing import Union
 
 
 class Dataset:
-    def __init__(self, graph: nx.Graph, edge_weight_attr=None) -> None:
+    def __init__(
+        self, graph: nx.Graph, edge_weight_attr: Union[None, str] = "weight"
+    ) -> None:
         if not isinstance(graph, nx.Graph):
             raise TypeError(
                 "data must be of nx.Graph type. "
@@ -45,10 +48,10 @@ class Dataset:
 
         summary_str = (
             f"Node degree summary: \n"
-            f" - Min: {node_degree_summary['min']}\n"
-            f" - Max: {node_degree_summary['max']}\n"
-            f" - Mean: {node_degree_summary['mean']}\n"
-            f" - Median: {node_degree_summary['median']}\n"
+            f" - Min: {node_degree_summary['min']:.2f}\n"
+            f" - Max: {node_degree_summary['max']:.2f}\n"
+            f" - Mean: {node_degree_summary['mean']:.2f}\n"
+            f" - Median: {node_degree_summary['median']:.2f}\n"
         )
         return summary_str
 
@@ -69,10 +72,10 @@ class Dataset:
 
         summary_str = (
             f"Edge summary: \n"
-            f" - Min: {edge_weight_summary['min']}\n"
-            f" - Max: {edge_weight_summary['max']}\n"
-            f" - Mean: {edge_weight_summary['mean']}\n"
-            f" - Median: {edge_weight_summary['median']}"
+            f" - Min: {edge_weight_summary['min']:.2f}\n"
+            f" - Max: {edge_weight_summary['max']:.2f}\n"
+            f" - Mean: {edge_weight_summary['mean']:.2f}\n"
+            f" - Median: {edge_weight_summary['median']:.2f}"
         )
         return summary_str
 
@@ -97,7 +100,7 @@ class BipartiteDataset(Dataset):
     def __init__(
         self,
         graph,
-        edge_weight_attr: str = None,
+        edge_weight_attr: str = "weight",
         bi_attr_key: str = "bipartite",
         bi_attr_outcome=0,
         bi_attr_diversion=1,
@@ -120,7 +123,33 @@ class BipartiteDataset(Dataset):
         )
         return data_summary
 
+    def _compute_node_degrees(self, node_type) -> np.ndarray:
+        """warnings we assume node order do not change"""
+        if node_type == "outcome":
+            nodes = [
+                n
+                for n, d in self.graph.nodes(data=True)
+                if d.get(self.bi_attr_key) == self.bi_attr_outcome
+            ]
+        elif node_type == "diversion":
+            nodes = [
+                n
+                for n, d in self.graph.nodes(data=True)
+                if d.get(self.bi_attr_key) == self.bi_attr_diversion
+            ]
+            # Compute the degree for each food node
+        return np.array([self.graph.degree(node) for node in nodes])
+
+    @property
+    def degree_outcome(self):
+        return self._compute_node_degrees(node_type="outcome")
+
+    @property
+    def degree_diversion(self):
+        return self._compute_node_degrees(node_type="diversion")
+
     def _count_units(self):
+        """Count number of outcome and diversion units"""
         outcome_count = sum(
             1
             for node, data in self.graph.nodes(data=True)
