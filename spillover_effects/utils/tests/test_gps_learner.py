@@ -3,13 +3,7 @@ import numpy as np
 from spillover_effects.utils.gps_learners import HistogramLearner
 from numpy.testing import assert_array_equal
 
-# def test_make_prob_dist():
-#     tr_vector = np.array([1, 1, 0, 0])
-#     adj_matrix = np.array([[0, 1, 0, 0], [1, 0, 1, 0], [0, 1, 0, 1], [0, 0, 1, 0]])
-
-#     assert make_prob_dist(adj_matrix, tr_vector) == np.array([1.0, 0.5, 0.5, 0.0])
 NUM_BINS = 10
-
 
 @pytest.fixture
 def exposure_training_data():

@@ -6,7 +6,6 @@ from spillover_effects.datapipes.make_graph import (
 from spillover_effects.utils.dataset import Dataset, BipartiteDataset
 
 
-@pytest.mark.ci
 def test_dataset_summary():
     """Test dataset summary method"""
     not_graph = 100
@@ -27,7 +26,6 @@ def test_dataset_summary():
     assert isinstance(lattice_dataset._edge_summary(), str)
 
 
-@pytest.mark.ci
 def test_bipartite_dataset_count_units():
     """test count outcome and diversion units for bipartite dataset"""
     bigraph = make_bipartite_graph(n_outcome=100, n_diversion=30)
