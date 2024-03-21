@@ -68,8 +68,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_base_dir", type=str, help="data directory.")
     parser.add_argument("--save_dir", type=str, help="save directory.")
     parser.add_argument("--file_name", type=str, help="file name.")
-    parser.add_argument("--node_0", type=str, help="node 0 for bipartite graph.")
-    parser.add_argument("--node_1", type=str, help="node 1 for bipartite graph.")
+    parser.add_argument("--node_0", type=str, help="node 0 name for bipartite graph.")
+    parser.add_argument("--node_1", type=str, help="node 1 name for bipartite graph.")
     parser.add_argument(
         "weight_name", default=None, help="name for bipartite graph edge weights."
     )
@@ -93,5 +93,5 @@ if __name__ == "__main__":
     bi_graph = getBipartite(
         df, node_0=node_0_name, node_1=node_1_name, weight_name=weight_name
     )
-
+    # TO ADD: save the outcome col Y here
     pickle.dump(bi_graph, open(output_path, "wb"))

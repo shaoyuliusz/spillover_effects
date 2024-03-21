@@ -3,83 +3,164 @@ import random
 import networkx as nx
 
 
-def make_graph(n, k, p, model, seed=None):
-    """factory to build random graphs"""
+def make_graph(n, model, weight="weight", seed=None, **kwargs):
+    """
+    Factory function to build random graphs.
 
+    Parameters
+    ----------
+    n : int
+        The number of nodes in the graph.
+    model : str
+        The type of random graph to generate. Options are:
+            - "sq_lattice": Square lattice graph.
+            - "scale_free": Barabasi-Albert scale-free graph.
+            - "small_world": Watts-Strogatz small-world graph.
+    weight : str, optional
+        The attribute name for edge weights. Defaults to "weight".
+    seed : int, optional
+        Random seed for reproducibility.
+    **kwargs:
+        for small-world graph model:
+        k : int, default=4
+            Each node is joined with its `k` nearest neighbors in a ring topology.
+        p : float, default=0.2
+            The probability of rewiring each edge in the Watts-Strogatz small-world graph model.
+
+    Returns
+    -------
+    networkx.Graph
+        The generated random graph.
+
+    Raises
+    ------
+    ValueError
+        If an invalid model is specified.
+
+    """
     if model == "sq_lattice":
-        return make_sq_lattice_graph(n)
+        return make_sq_lattice_graph(n, weight, seed)
     elif model == "scale_free":
-        return make_barabasi_graph(n, seed)
+        return make_barabasi_graph(n, weight, seed)
     elif model == "small_world":
-        return make_watts_strogatz_graph(n, k, p, seed)
-    # elif model == "confounded_small_world":
-    #    return make_confounded_watts_strogatz_graph(n, k, p, seed)
-    ##elif model == "dcbm":
-    ##   return make_adj_matrix_dcbm(N, seed)
+        k = kwargs.get("k", 4)
+        p = kwargs.get("p", 0.2)
+        return make_watts_strogatz_graph(n, k, p, weight, seed)
     else:
         raise ValueError("Invalid model specified")
 
 
-def make_sq_lattice_graph(N, weighted=False) -> nx.Graph:
+def make_sq_lattice_graph(N, weight="weight", seed=None) -> nx.Graph:
     """
     Generate a circular lattice graph
     """
+    np.random.seed(seed)
     if np.sqrt(N) != np.round(np.sqrt(N)):
         raise ValueError(f"N must be a square number, not {N}.")
 
     dim = int(np.sqrt(N))
     G = nx.generators.lattice.grid_2d_graph(dim, dim, periodic=True)
 
-    if weighted:
+    if weight:
         for u, v in G.edges():
             # Generate random weight for each edge
-            # weight = np.random.uniform(low=1, high=2)  # adjust range as needed
-            weight = 1
-            G[u][v]["weight"] = weight
+            wei = np.random.uniform(low=1, high=2)  # adjust range as needed
+            G[u][v][weight] = wei
 
     return G
 
 
-def make_barabasi_graph(N, seed):
+def make_barabasi_graph(N, weight="weight", seed=None):
     """
     Returns a random graph using Barabási–Albert preferential attachment
     """
-    random.seed(seed)
-
+    np.random.seed(seed)
     G = nx.barabasi_albert_graph(N, 5, seed)
     while min(G.degree()) == 0:
         G = nx.barabasi_albert_graph(N, 5, seed)
+
+    if weight:
+        for u, v in G.edges():
+            # Generate random weight for each edge
+            wei = np.random.uniform(low=1, high=2)  # adjust range as needed
+            G[u][v][weight] = wei
     return G
 
 
 def make_watts_strogatz_graph(
-    n: int, k: int, p: float, seed=None, weighted=False
+    n: int, k: int, p: float, weight="weight", seed=None
 ) -> nx.Graph:
     """
     make a Watts Strogatz small world graph, make sure no unconnected units
+
     Args:
         n: number of nodes
         k: Each node is joined with its k nearest neighbors in a ring topology.
         p: The probability of rewiring each edge
         seed: indicator for random number generation state
+        weight: edge weight name
+
     Returns:
+        G: nx.Graph
 
     """
+    np.random.seed(seed)
     alpha, beta = 2, 0.5
 
-    np.random.seed(seed)
     G = nx.watts_strogatz_graph(n, k, p, seed)
     while min(G.degree()) == 0:
         G = nx.watts_strogatz_graph(n, k, p)
 
-    if weighted:
+    if weight:
         for u, v in G.edges():
             # Generate random weight for each edge
-            weight = np.random.beta(
-                alpha, beta, size=1
-            ).item()  # adjust range as needed
-            G[u][v]["weight"] = weight
+            wei = np.random.beta(alpha, beta, size=1).item()
+            G[u][v][weight] = wei
 
+    return G
+
+
+def make_bipartite_graph(n_outcome=1000, n_diversion=100, weight="weight", seed=None):
+    """
+    Create a bipartite graph where there are n_outcome outcome units and n_diversion diversion units.
+    Similar to Causal Inference with Bipartite Designs
+
+    Parameters:
+        n_outcome: number of outcome units
+        n_diversion: number of diversion units, or units we randomize on.
+        weight: edge weight
+        seed: indicator for random number generation state
+    Returns:
+        G: nx.Graph
+    """
+    random.seed(seed)
+    np.random.seed(seed)
+
+    if n_diversion < 10:
+        raise ValueError("number of diversion units must be larger than 10. ")
+
+    # Generate random values for m_i for each node in U
+    m_values = [random.randint(1, 10) for _ in range(n_outcome)]
+
+    # Create a bipartite graph
+    G = nx.Graph()
+
+    # Add nodes from sets U and V
+    G.add_nodes_from(range(n_outcome), bipartite=0)  # outcome nodes
+    G.add_nodes_from(
+        range(n_outcome, n_outcome + n_diversion), bipartite=1
+    )  # diversion nodes
+
+    # Add edges between nodes
+    for i, m_i in enumerate(m_values):
+        v_set = np.random.choice(
+            range(n_outcome, n_outcome + n_diversion), size=m_i, replace=False
+        )
+        for v in v_set:
+            if weight is not None:
+                G.add_edge(i, v, weight=1 / m_i)
+            else:
+                G.add_edge(i, v)
     return G
 
 
@@ -143,31 +224,3 @@ def make_watts_strogatz_graph(
 #     while min(G.degree()) == 0:
 #         make_confounded_watts_strogatz_graph(n, k, p)
 #     return G
-
-
-def make_bipartite_graph(num_nodes_U=1000, num_nodes_V=100):
-    """
-    Create a bipartite graph where there are n_outcome outcome units and n_diversion diversion units.
-    Similar to Causal Inference with Bipartite Designs
-    """
-
-    # Generate random values for m_i for each node in U
-    m_values = [random.randint(1, 3) for _ in range(num_nodes_U)]
-
-    # Create a bipartite graph
-    G = nx.Graph()
-
-    # Add nodes from sets U and V
-    G.add_nodes_from(range(num_nodes_U), bipartite=0)  # U nodes
-    G.add_nodes_from(
-        range(num_nodes_U, num_nodes_U + num_nodes_V), bipartite=1
-    )  # V nodes
-
-    # Add edges between nodes in U and V
-    for i, m_i in enumerate(m_values):
-        v_set = np.random.choice(
-            range(num_nodes_U, num_nodes_U + num_nodes_V), size=m_i, replace=False
-        )
-        for v in v_set:
-            G.add_edge(i, v, weight=1/m_i)
-    return G
