@@ -1,68 +1,249 @@
+"""
+Script to run simulations
+
+Example usage:
+
+python3 spillover_effects/simulation.py --outcome_effects heterogeneous \
+                      --n_simulations 100 \
+                      --output_dir ./output \
+                      --n_outcome 1000 \
+                      --n_diversion 100 \
+                      --p_treatment 0.5 \
+                      --n_resample 10000 \
+                      --n_grids 21 \
+                      --lower_grid_constraint 0.0 \
+                      --upper_grid_constraint 1.0
+
+"""
+
+from datapipes.make_graph import make_graph, make_bipartite_graph
+from utils.dataset import BipartiteDataset
+
 import numpy as np
 import pandas as pd
 import networkx as nx
 
+from tqdm import tqdm
 from joblib import Parallel, delayed
 from functools import partial
-from spillover_effects.datapipes.make_graph import make_graph
-from spillover_effects.scratch.make_exposure_map_AS import make_exposure_map_AS
-from make_tr_vec_perm import (
-    make_tr_vec_permutation_wo_rep,
-    make_tr_vec_permutation_w_rep,
+
+import pandas as pd
+import numpy as np
+import logging
+from functools import partial
+from datapipes.make_dilated_out import (
+    make_dilated_baseline_continuous,
+    generate_ground_truth_grid,
+    generate_ground_truth_grid_bipartite,
+    generate_obs_outcome,
+    generate_obs_outcome_bipartite,
 )
-from spillover_effects.scratch.make_exposure_prob import make_exposure_prob
-from spillover_effects.scratch.estimates import estimates
-from spillover_effects.datapipes.make_dilated_out import make_dilated_out_1, make_dilated_out_2, make_corr_out
+
+from datapipes.make_graph import make_graph, make_bipartite_graph
+from datapipes.experiment_design import (
+    gen_treatment_assignment,
+    gen_treatment_assignment_bipartite,
+    gen_treatment_assignment_simulation,
+    gen_treatment_assignment_simulation_bipartite,
+)
+
+from utils.polynomials import quadratic, sigmoid, middle_points
+from utils.dataset import Dataset, BipartiteDataset
+from utils.dataloader import ImputeDataLoader, DesignDataLoader
+from utils.gps_learners import HistogramLearner
+
+from models.ht_estimator import DesignEstimator
 
 
-def gen_one_simulation(adj_matrix, potential_outcome, N, p, seed):
-    """generate one simulation"""
+def simulate_bipartite_design(
+    outcome_effects,
+    n_simulations,
+    output_dir,
+    seed=123,
+    n_outcome=1000,
+    n_diversion=100,
+    p_treatment=0.5,
+    n_resample=10000,
+    n_grids=21,
+    lower_grid_constraint=0,
+    upper_grid_constraint=1,
+):
+    yT_out_list = []
+    tau_out_list = []
 
-    # generate one treatment vector
-    tr_vector = make_tr_vec_permutation_wo_rep(N=N, p=p, R=1, seed=seed)
+    # fix a graph dataset
+    bigraph = make_bipartite_graph(n_outcome, n_diversion, weight="weight", seed=seed)
+    bi_dataset = BipartiteDataset(graph=bigraph, edge_weight_attr="weight")
+    dataloader = DesignDataLoader(bi_dataset)
 
-    # Create treatment exposure conditions
-    obs_exposure = make_exposure_map_AS(adj_matrix, tr_vector, hop=1)
+    degrees = bi_dataset.degree_outcome
 
-    obs_outcome = np.sum(
-        obs_exposure * potential_outcome, axis=1
-    )  # (200,) vector of observed outcomes
+    grid_exposure = np.linspace(lower_grid_constraint, upper_grid_constraint, n_grids)
+    if outcome_effects == "heterogeneous":
+        df_ground_truth = generate_ground_truth_grid_bipartite(
+            potential_outcome_base=degrees, grid=grid_exposure
+        )
 
-    potential_tr_vector = make_tr_vec_permutation_w_rep(N=N, p=p, R=10000, seed=seed)
+    elif outcome_effects == "homogeneous":
+        df_ground_truth = generate_ground_truth_grid_bipartite(
+            potential_outcome_base=np.mean(degrees), grid=grid_exposure
+        )
 
-    obs_prob_exposure = make_exposure_prob(
-        potential_tr_vector, adj_matrix, make_exposure_map_AS, {"hop": 1}
+    # tau(1, 0)
+
+    tau_true = (
+        df_ground_truth.loc[df_ground_truth["grid"] == 1, "yt_true"].values[0]
+        - df_ground_truth.loc[df_ground_truth["grid"] == 0, "yt_true"].values[0]
     )
 
-    out_data = estimates(obs_exposure, obs_outcome, obs_prob_exposure)
-
-    ytht = pd.DataFrame(
-        data=out_data["yT_ht"].reshape(1, -1),
-        columns=["dir_ind1", "isol_dir", "ind1", "no"],
-    )
-    yth = pd.DataFrame(
-        data=out_data["yT_h"].reshape(1, -1),
-        columns=["dir_ind1", "isol_dir", "ind1", "no"],
+    t_assignment_sim = gen_treatment_assignment_simulation_bipartite(
+        n_diversion, n_outcome, p_treatment, n_resample, num_workers=-1, set_seed=seed
     )
 
-    return ytht, yth
+    for i in tqdm(range(n_simulations)):
+        # generate a new treatment vector
+        t_assignment = gen_treatment_assignment_bipartite(
+            n_diversion, n_outcome, p_treatment, set_seed=i
+        )
+
+        dataloader.prepare_data(t_assignment, t_assignment_sim, n_grids=n_grids)
+        # exposure vector differs in each iteration
+        exposure_vector = dataloader.exp_vec
+        grid_exposure = dataloader.treatment_grid
+
+        if outcome_effects == "heterogeneous":
+            obs_outcome = generate_obs_outcome_bipartite(degrees, exposure_vector)
+        elif outcome_effects == "homogeneous":
+            constant_C = np.mean(degrees)
+            obs_outcome = generate_obs_outcome_bipartite(constant_C, exposure_vector)
+
+        ht_est = DesignEstimator(dataloader=dataloader, obs_outcome=obs_outcome)
+        ht_est.fit().var_yT_ht_adjusted().tau_ht().var_tau_ht()
+
+        tau_ht_ci_lower = ht_est.tau_ht - 1.96 * ht_est.var_tau_ht
+        tau_ht_ci_upper = ht_est.tau_ht + 1.96 * ht_est.var_tau_ht
+
+        if tau_true <= tau_ht_ci_upper and tau_true >= tau_ht_ci_lower:
+            covered = True
+
+        yT_out = {"yT_ht": ht_est.yT_ht, "var_yT_ht": ht_est.var_yT_ht}
+
+        tau_out = {
+            "tau_ht": ht_est.tau_ht,
+            "var_tau_ht": ht_est.var_tau_ht,
+            "tau_ht_ci_lower": tau_ht_ci_lower,
+            "tau_ht_ci_upper": tau_ht_ci_upper,
+            "tau_true": tau_true,
+            "cover": covered,
+        }
+
+        yT_out_list.append(yT_out)
+        tau_out_list.append(tau_out)
+
+    yT_out = pd.concat(
+        [pd.DataFrame.from_dict(yT_out_list[i]) for i in range(n_simulations)]
+    )
+    return yT_out, df_ground_truth, pd.DataFrame(tau_out_list)
 
 
-def output_simulation(n, k, p, model, confounding=False, n_sims=100, seed=None):
-    # "confounded_small_world"
-    rand_graph = make_graph(n, k, p, model)
-    if confounding == False:
-        potential_outcome = make_dilated_out_1(rand_graph, make_corr_out)
-    else:
-        potential_outcome = make_dilated_out_2(rand_graph, make_corr_out)
+import argparse
+import os
+import pandas as pd
 
-    adj_matrix = nx.adjacency_matrix(rand_graph).toarray()
-    partial_gen_one_sim = partial(
-        gen_one_simulation, adj_matrix, potential_outcome, n, p, seed
+# Import your function here
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Run bipartite design simulation.")
+    parser.add_argument(
+        "--outcome_effects",
+        type=str,
+        default="heterogeneous",
+        choices=["heterogeneous", "homogeneous"],
+        help="Type of outcome effects: 'heterogeneous' or 'homogeneous'. Default is 'heterogeneous'.",
+    )
+    parser.add_argument(
+        "--n_simulations",
+        type=int,
+        default=100,
+        help="Number of simulations to run. Default is 100.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="./output",
+        help="Directory to save the output files. Default is './output'.",
+    )
+    parser.add_argument(
+        "--n_outcome",
+        type=int,
+        default=1000,
+        help="Number of outcome nodes. Default is 1000.",
+    )
+    parser.add_argument(
+        "--n_diversion",
+        type=int,
+        default=100,
+        help="Number of diversion nodes. Default is 100.",
+    )
+    parser.add_argument(
+        "--p_treatment",
+        type=float,
+        default=0.5,
+        help="Probability of treatment assignment. Default is 0.5.",
+    )
+    parser.add_argument(
+        "--n_resample",
+        type=int,
+        default=10000,
+        help="Number of resamples. Default is 10000.",
+    )
+    parser.add_argument(
+        "--n_grids",
+        type=int,
+        default=21,
+        help="Number of grids for exposure vector. Default is 21.",
+    )
+    parser.add_argument(
+        "--lower_grid_constraint",
+        type=float,
+        default=0,
+        help="Lower bound for exposure grid. Default is 0.",
+    )
+    parser.add_argument(
+        "--upper_grid_constraint",
+        type=float,
+        default=1,
+        help="Upper bound for exposure grid. Default is 1.",
+    )
+    # Add more arguments as needed
+
+    args = parser.parse_args()
+
+    # Run simulation
+    yT_out, df_ground_truth, tau_out = simulate_bipartite_design(
+        outcome_effects=args.outcome_effects,
+        n_simulations=args.n_simulations,
+        n_outcome=args.n_outcome,
+        n_diversion=args.n_diversion,
+        p_treatment=args.p_treatment,
+        n_resample=args.n_resample,
+        n_grids=args.n_grids,
+        lower_grid_constraint=args.lower_grid_constraint,
+        upper_grid_constraint=args.upper_grid_constraint,
+        output_dir=args.output_dir,
     )
 
-    mc_sim = Parallel(n_jobs=-1, verbose=2)(
-        delayed(partial_gen_one_sim)() for _ in range(int(n_sims))
-    )
+    # Create output directory if it doesn't exist
+    os.makedirs(args.output_dir, exist_ok=True)
 
-    return potential_outcome, mc_sim
+    # Save output to directory
+    yT_out.to_csv(os.path.join(args.output_dir, "yT_out.csv"), index=False)
+    df_ground_truth.to_csv(
+        os.path.join(args.output_dir, "df_ground_truth.csv"), index=False
+    )
+    tau_out.to_csv(os.path.join(args.output_dir, "tau_out.csv"), index=False)
+
+
+if __name__ == "__main__":
+    main()
