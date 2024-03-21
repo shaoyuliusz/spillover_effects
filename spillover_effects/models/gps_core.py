@@ -14,7 +14,8 @@ import statsmodels.api as sm
 from statsmodels.genmod.families.links import inverse_power as Inverse_Power
 from statsmodels.tools.tools import add_constant
 
-from dataloader import ImputeDataLoader
+from utils.dataloader import ImputeDataLoader
+from .gps_base import Core
 
 
 class GPS_Core(Core):
@@ -124,7 +125,7 @@ class GPS_Core(Core):
         self.verbose = verbose
 
         self.grid_values = self.dataloader.treatment_grid
-        self.treatment_grid_num = self.dataloader.n_bins
+        self.treatment_grid_num = self.dataloader.n_grids
         if self.dataloader._is_bipartite_data:
             self.T = self.dataloader.tr_vec[: self.dataloader.n_outcome]
         else:
@@ -436,8 +437,7 @@ class GPS_Core(Core):
 
     def _fit_gam(self):
         """Fits a GAM that predicts the outcome (continuous or binary) from the treatment and GPS"""
-        print("T shape", self.T.shape)
-        print("exposure gps shape., ", self.dataloader.exposure_gps.shape)
+
         X = np.column_stack((self.T, self.dataloader.exposure_gps))
         y = np.asarray(self.y)
 

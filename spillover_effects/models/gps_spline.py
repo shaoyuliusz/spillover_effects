@@ -4,8 +4,7 @@ Defines the Generalized Prospensity Score (GPS) regressor model class
 
 from pprint import pprint
 import numpy as np
-from gps_core import GPS_Core
-from ..utils.dataloader import ImputeDataLoader
+from .gps_core import GPS_Core
 
 
 class GPS_SplineRegressor(GPS_Core):
@@ -28,7 +27,7 @@ class GPS_SplineRegressor(GPS_Core):
 
     def __init__(
         self,
-        dataloader: ImputeDataLoader,
+        dataloader,
         spline_order=3,
         n_splines=30,
         lambda_=0.5,

@@ -1,5 +1,5 @@
 import numpy as np
-from ..utils.dataloader import DesignDataLoader
+from utils.dataloader import DesignDataLoader
 
 
 class DesignEstimator:
@@ -174,7 +174,7 @@ class DesignEstimator:
             k_to_include=[d_k],
             j_to_include=[d_j],
         )
-        print(cov_yT_A)
+
         cov_yT_A = cov_yT_A[f"{d_k},{d_j}"]
 
         var_tau_ht = (1 / self.N**2) * (

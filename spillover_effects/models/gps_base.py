@@ -12,8 +12,6 @@ class Core:
     def __init__(self):
         pass
 
-    __version__ = "1.0.6"
-
     def get_params(self):
         """Returns a dict of all of the object's user-facing parameters
 
