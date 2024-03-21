@@ -1,6 +1,7 @@
 import numpy as np
 from sklearn.base import BaseEstimator
 from sklearn.neighbors import KernelDensity
+from typing import Union
 
 
 class HistogramLearner(BaseEstimator):
@@ -9,12 +10,11 @@ class HistogramLearner(BaseEstimator):
 
     def fit(self, X: np.ndarray):
         """locate X in histograms
-
         Args:
-        X: (N, 1)
+            X: (R, 1) shaped array: exposure distribution of a given unit.
 
         Returns
-        self : object
+            self : object
             Returns the instance itself.
         """
         hist, bin_edges = np.histogram(
@@ -24,19 +24,31 @@ class HistogramLearner(BaseEstimator):
         self.bin_edges = bin_edges
         return self
 
-    def score_samples(self, X) -> np.ndarray:
-        """compute the propensity score for the given X
+    def score_samples(self, exp_level: Union[float, np.ndarray]) -> np.ndarray:
+        """compute the propensity score for the given exposure
 
-        Args:
-            X: (N,)
+        Parameters:
+            exp_level: a scalar of exposure level or a (N, ) array specifying the exposure grids
+
         Returns:
-            grid_score (N,)
+            bin_score
+                if scalar, then returns an array (1,) shape for its probability
+                if (N, ) array, then returns (N, ) gps (probability of happening) at the specified grids
         """
 
-        inds = np.digitize(X, self.bin_edges, right=True)
-        # inds[-1] -= 1
-        grid_score = self.hist[inds - 1].reshape(-1)
-        return grid_score
+        inds = np.digitize(exp_level, self.bin_edges, right=False)
+
+        # deal with the right edge case
+        if isinstance(inds, (int, np.integer)):
+            if inds > len(self.hist):
+                inds -= 1
+        elif isinstance(inds, np.ndarray):
+            right_edge = int(len(self.hist)) + 1
+            inds[inds == right_edge] -= 1
+
+        # compute probability in bins
+        bin_score = self.hist[inds - 1].reshape(-1)
+        return bin_score
 
 
 class ReflectiveLearner(BaseEstimator):

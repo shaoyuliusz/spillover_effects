@@ -473,6 +473,7 @@ class DesignDataLoader(DataLoader):
         # avoid recomputing exposure probs in repeated calls
         if self.exposure_probs is None:
             # compute exposure probabilities dictionaries
+
             I_exposure, prob_exposure_k_k, prob_exposure_k_l = self.make_exposure_prob(
                 t_assignment_sim, n_grids
             )
@@ -502,5 +503,3 @@ class DesignDataLoader(DataLoader):
         self.exp_vec = exp_vec
 
         self.obs_exposure = obs_exposure
-
-        return self
