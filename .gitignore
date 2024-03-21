@@ -1,6 +1,8 @@
 # papers
 papers/
 
+#output
+output/
 # scratch notebooks
 notebooks/
 spillover_effects/scratch/
