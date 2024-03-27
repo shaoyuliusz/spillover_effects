@@ -1,8 +1,9 @@
 import numpy as np
-
+from itertools import product
 from tqdm import tqdm
-from typing import Dict, Any, Union
+from typing import Dict, Any, Union, Optional
 from abc import ABC, abstractmethod
+
 
 from .gps_learners import ReflectiveLearner
 from .dataset import Dataset, BipartiteDataset
@@ -17,10 +18,6 @@ class DataLoader(ABC):
     ----------
     data : :class:`Dataset` object
         The :class:`DoubleMLData` object providing the organized graph data.
-    n_grids: number of treatment grids
-    p_treatment: percentage of units assigned to treatment
-    n_resample: number of resample times for estimating generalized propensity score
-    num_workers: number of cores for parallel processing when generating treatment simulations
     """
 
     def __init__(
@@ -52,6 +49,10 @@ class DataLoader(ABC):
                 f"data parameter must be of Dataset type, "
                 f"but found type {type(self.data)}."
             )
+
+    @abstractmethod
+    def make_prob_dist(self):
+        pass
 
     @abstractmethod
     def prepare_data(self):
@@ -228,11 +229,11 @@ class ImputeDataLoader(DataLoader):
         Returns:
         ----------
 
-            self
+        self: object
         """
         if not isinstance(t_assignment, np.ndarray):
             raise TypeError(
-                f"t_assignment must be an numpy array",
+                f"t_assignment must be a numpy array",
                 f"but is of {type(t_assignment)}",
             )
         if n_grids and not isinstance(n_grids, int):
@@ -254,6 +255,13 @@ class ImputeDataLoader(DataLoader):
                 f"n_bins parameter must be an integer, "
                 f"but found type {type(n_bins)}."
             )
+        if not self._is_bipartite_data and len(t_assignment) != self.n_units:
+            raise ValueError("treatment input shape not equal to number of units! ")
+        if (
+            self._is_bipartite_data
+            and len(t_assignment) != self.data.n_outcome + self.data.n_diversion
+        ):
+            raise ValueError("treatment input shape not equal to number of units! ")
 
         if treatment_grid is None:
             # compute treatment_grid
@@ -301,27 +309,25 @@ class DesignDataLoader(DataLoader):
     def __init__(
         self,
         data: Dataset,
-        lower_grid_constraint=0.0,
-        upper_grid_constraint=1.0,
     ):
         super().__init__(data)
         self.tr_vec = None
         self.tr_sim = None
         self.exp_vec = None
         self.exposure_probs = None
-        self.obs_exposure = None
+        self.obs_exposure_map = None
         self.treatment_grid = None
         self.n_grids = None
-        self.lower_grid_constraint = lower_grid_constraint
-        self.upper_grid_constraint = upper_grid_constraint
+        self.use_dosage = False
+        self.exposure_dict = None
 
-    def make_prob_dist(self, adj_matrix, tr_vec):
+    def make_prob_dist(self, adj_matrix: np.ndarray, tr_vec: np.ndarray) -> np.ndarray:
         """
         make probability distribution of exposure levels through large number of MC simulations
 
         Parameters:
             adj_matrix: N x N adjacency matrix of the graph
-            tr_vector: a (N, ) binary vector or (1, N) matrix indicating treatment assignment, or a N x R matrix with R simulations
+            tr_vector: a (N, ) binary vector indicating treatment assignment, or a N x R matrix with R simulations
 
         Returns:
             (N, ) or (R, N) matrix where each row is the exposure of N units for a particular treatment assignment.
@@ -333,34 +339,112 @@ class DesignDataLoader(DataLoader):
 
         return exp_mat
 
-    def make_obs_exposure(self, exposure_vec):
+    def make_exposure_map(
+        self,
+        exposure_vec: np.ndarray,
+        tr_vec: Optional[np.ndarray],
+        use_dosage: bool,
+        n_grids: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """
         Args:
-            exposure_vec: (N, ) exposure vector induced by a particular treatment vector
+            tr_vec: (N, ) treatment vector, values 0 or 1.
+            exposure_vec: (N, ) exposure vector induced by a particular treatment vector, values between 0 and 1.
 
         Returns:
-            bin_membership: true/false matrix of shape (N, K), each row represents a unit's status
-            in K exposure levels (bins)
+            exposure_map: true/false matrix of shape
+            1) (N, K*2): each row represents a unit's status in K exposure levels (bins),
+            where the first K columns represents exposure levels when treatment=0,
+            and K+1...2K columns represents exposure levels when treatment=1.
+            2) (N, K): for bipartite data, each row represents a unit's status in K exposure levels (bins),
+
+        e.g. tr_vec = array([1, 1, 0, 0, 0, 0, 0, 0, 0])
+             exposure_vec = array([1, 1, 0, 0, 1, 0.5, 0.3, 0.7])
+
         """
-        bin_edges = np.linspace(
-            self.lower_grid_constraint, self.upper_grid_constraint, self.n_grids
-        )
-        bin_edges[-1] = 1.01
-        # Create a boolean array indicating whether each element falls into each bin (1000, 10)
-        bin_membership = (exposure_vec[:, np.newaxis] >= bin_edges[:-1]) & (
-            exposure_vec[:, np.newaxis] < bin_edges[1:]
-        )
-        assert (
-            bin_membership.shape[1] == self.n_grids - 1
-        ), "number of bins = number of grids - 1"
+        if self._is_bipartite_data and tr_vec is not None:
+            raise ValueError("On bipartite graph dataset, tr_vec must be None.")
+        if not self._is_bipartite_data and tr_vec is None:
+            raise ValueError("On regular graph dataset, tr_vec must not be None. ")
+
+        exposure_map = self._make_exposure_membership(exposure_vec, use_dosage, n_grids)
+        if not self._is_bipartite_data:
+            exposure_map = self._make_exposure_treatment_membership(
+                tr_vec, exposure_map
+            )
+
+        return exposure_map
+
+    def _make_exposure_membership(
+        self, exposure_vec: np.ndarray, use_dosage: bool, n_grids: Optional[int] = None
+    ) -> np.ndarray:
+        """generate mapping matrix for exposure levels
+        Args:
+            exposure_vec: (N, ) exposure vector
+            use_dosage: if using dosage, segment exposure space to bins using number of grids = n_grids.
+            n_grids: number of grids for dosage computation.
+
+        Returns:
+            bin_membership: (N, K) bool matrix, each row represents the unit's exposure in k th condition.
+        """
+        offset = 0.01
+
+        if use_dosage:
+            bin_edges = np.linspace(0, 1, n_grids)
+            bin_edges[-1] = 1 + offset
+            # Create a boolean array indicating whether each element falls into each bin (N, K)
+            bin_membership = (exposure_vec[:, np.newaxis] >= bin_edges[:-1]) & (
+                exposure_vec[:, np.newaxis] < bin_edges[1:]
+            )
+            # res = [f"[{i:.2f}, {j:.2f})" for i, j in zip(bin_edges[:-1], bin_edges[1:])]
+            # res[-1] = f"[{bin_edges[-2]:.2f}, {bin_edges[-1]-offset:.2f}]"
+
+            assert (
+                bin_membership.shape[1] == n_grids - 1
+            ), "number of bins = number of grids - 1"
+
+        else:
+            bin_membership = np.zeros((len(exposure_vec), 2), dtype=bool)
+            bin_membership[exposure_vec == 0, 0] = True
+            bin_membership[exposure_vec > 0, 1] = True
 
         return bin_membership
 
-    def make_exposure_prob(self, tr_sim_vec: np.ndarray, n_grids: int) -> tuple:
+    def _make_exposure_treatment_membership(
+        self, tr_vec: np.ndarray, bin_membership: np.ndarray
+    ) -> np.ndarray:
+        """generate exposure conditions using treatment assignment and exposure mappings
+
+        Args:
+            tr_vec: (N, ) vector of treatment
+            bin_membership: (N, K) bool matrix of exposure membership
+
+        Returns:
+            bool matrix of (N, 2*K) of treatment cross exposure membership
+        """
+        # Create a new array with shape (N, 2) represents treatment mapping
+        tr_membership = np.zeros((len(tr_vec), 2), dtype=bool)
+        tr_membership[tr_vec == 1, 1] = True
+        tr_membership[tr_vec == 0, 0] = True
+
+        # Repeat the first and second column 5 times for treatment membership matrix
+        K = bin_membership.shape[1]  # K: number of exposure conditions
+        first_col_repeated = np.repeat(tr_membership[:, 0][:, np.newaxis], K, axis=1)
+        second_col_repeated = np.repeat(tr_membership[:, 1][:, np.newaxis], K, axis=1)
+        repeated_arr = np.concatenate((first_col_repeated, second_col_repeated), axis=1)
+
+        return np.tile(bin_membership, 2) & repeated_arr
+
+    def make_exposure_prob(
+        self,
+        tr_sim_vec: np.ndarray,
+        use_dosage: bool,
+        n_grids: Optional[int],
+    ) -> tuple:
         """create a tuple of dictionaries of I_exposure, prob_exposure_k_k, prob_exposure_k_j:
         Args:
             tr_sim_vec: (R, N) simulated treatment assignment vector
-            n_grids: K
+            n_grids:
 
         Returns:
             a tuple of:
@@ -379,14 +463,28 @@ class DesignDataLoader(DataLoader):
             and zeroes on the diagonal. When K = 4, the number of numeric matrices is 12;
 
         """
+
+        # do checks for n_grids
+        if use_dosage and n_grids is None:
+            raise ValueError("n_grids must be provided if use_dosage == True")
+        if not use_dosage and n_grids is not None:
+            raise ValueError("n_grids must not be provided if use_dosage == False")
+
+        if self._is_bipartite_data and not use_dosage:
+            raise NotImplementedError(
+                "Not using dosage with bipartite data not yet implemented for {self.__class__.__name__}"
+            )
+        elif self._is_bipartite_data and n_grids:
+            K = n_grids - 1
+        elif not self._is_bipartite_data and n_grids:
+            K = 2 * (n_grids - 1)
+        else:
+            K = 2 * 2
+
         N = self.n_outcome if self._is_bipartite_data else self.n_units
-        K = n_grids - 1
         R = tr_sim_vec.shape[0]
 
         adj_matrix = self.data.adj_matrix.toarray()
-        # dist_tr = self.make_prob_dist(adj_matrix, tr_vec)
-        # if self._is_bipartite_data:
-        #     dist_tr = dist_tr[: self.n_outcome]
 
         exposure_names = ["t" + str(i) for i in range(K)]
         # a length K list of empty N x R matrices
@@ -396,9 +494,17 @@ class DesignDataLoader(DataLoader):
         for i in tqdm(range(R)):
             # compute exposure vector
             exp_vec = self.make_prob_dist(adj_matrix, tr_sim_vec[i, :])
+            # print("exp_vec: ", exp_vec)
             if self._is_bipartite_data:
                 exp_vec = exp_vec[: self.n_outcome]
-            potential_exposure = self.make_obs_exposure(exp_vec)
+                potential_exposure = self.make_exposure_map(
+                    exp_vec, None, use_dosage, n_grids
+                )
+            else:
+                potential_exposure = self.make_exposure_map(
+                    exp_vec, tr_sim_vec[i, :], use_dosage, n_grids
+                )
+
             for j in range(K):  # 0...K. other entries are zeros
                 I_exposure[j, :, i] = potential_exposure[:, j]
 
@@ -444,12 +550,13 @@ class DesignDataLoader(DataLoader):
         Args:
             prob_exposure_k_k: a dict of K symmetric N*N numeric matrices
         Returns:
+            N: outcome units for bipartite data or total units for regular data
             prob_exposure_cond: K x N matrix representing estimated π_i (d_k),
             each row is [π_1(d_k), π_2(d_k),...π_N(d_k)]
 
         """
 
-        K = self.n_grids - 1
+        K = len(prob_exposure_k_k)
         N = self.n_outcome if self._is_bipartite_data else self.n_units
 
         prob_exposure_cond = np.zeros((K, N))
@@ -458,31 +565,50 @@ class DesignDataLoader(DataLoader):
 
         return prob_exposure_cond
 
-    def _compute_treatment_grid(self, n_grids):
-        self.n_grids = n_grids
-        self.treatment_grid = np.linspace(
-            self.lower_grid_constraint, self.upper_grid_constraint, n_grids
-        )
+    def _make_exposure_dict(self, n_grids):
+        """make exposure dictionary where each index corresponds to an exposure condition."""
 
-    def prepare_data(self, t_assignment, t_assignment_sim, n_grids):
+        if n_grids is not None:
+            bin_edges = np.linspace(0, 1, n_grids)
+            exp_intervals = [
+                f"[e={i:.2f},{j:.2f})" for i, j in zip(bin_edges[:-1], bin_edges[1:])
+            ]
+        else:
+            exp_intervals = ["e=[0]", "e=(0,1]"]
+
+        if self._is_bipartite_data:
+            result_dict = {i: v for i, v in enumerate(exp_intervals)}
+        else:
+            treatment_intervals = ["t=0", "t=1"]
+            result_dict = {
+                index: f"({pair[0]}, {pair[1]})"
+                for index, pair in enumerate(
+                    product(treatment_intervals, exp_intervals)
+                )
+            }
+        return result_dict
+
+    def prepare_data(self, t_assignment, t_assignment_sim, use_dosage, n_grids):
         """
         prepare data for design-based estimator
         """
-        self._compute_treatment_grid(n_grids)
 
-        # avoid recomputing exposure probs in repeated calls
-        if self.exposure_probs is None:
-            # compute exposure probabilities dictionaries
+        self.exposure_dict = self._make_exposure_dict(n_grids)
+        self.use_dosage = use_dosage
+        if n_grids is not None:
+            self.treatment_grid = np.linspace(0, 1, n_grids)
 
+        # compute exposure probabilities dictionaries.
+        if not self.exposure_probs:
             I_exposure, prob_exposure_k_k, prob_exposure_k_l = self.make_exposure_prob(
-                t_assignment_sim, n_grids
+                t_assignment_sim, use_dosage, n_grids
             )
 
             # compute generalized propensity score π_i(d_k)
             obs_prob_exposure_individual_kk = self.make_prob_exposure_cond(
                 prob_exposure_k_k
             )
-
+            # cache the results
             self.exposure_probs = {
                 "I_exposure": I_exposure,
                 "prob_exposure_k_k": prob_exposure_k_k,
@@ -496,10 +622,16 @@ class DesignDataLoader(DataLoader):
             exp_vec = exp_vec[: self.n_outcome]
 
         # compute exposure in k conditions indicator matrix
-        obs_exposure = self.make_obs_exposure(exp_vec)
+        if self._is_bipartite_data:
+            obs_exposure_map = self.make_exposure_map(
+                exp_vec, None, use_dosage, n_grids
+            )
+        else:
+            obs_exposure_map = self.make_exposure_map(
+                exp_vec, t_assignment, use_dosage, n_grids
+            )
 
         self.tr_vec = t_assignment
         self.tr_sim = t_assignment_sim
         self.exp_vec = exp_vec
-
-        self.obs_exposure = obs_exposure
+        self.obs_exposure_map = obs_exposure_map
