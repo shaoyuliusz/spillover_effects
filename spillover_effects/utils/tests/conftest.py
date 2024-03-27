@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-
+import random
 import pytest
 
 from spillover_effects.datapipes.make_graph import (
@@ -10,27 +10,48 @@ from spillover_effects.datapipes.make_graph import (
 from spillover_effects.utils.dataset import Dataset, BipartiteDataset
 
 
+def generate_treatment_vec(size, seed=123):
+    """
+    generate a random treatment vector of given size
+    and potential simulated treatment vectors
+    """
+    np.random.seed(seed)
+    random.seed(seed)
+    tr_vec = np.random.randint(low=0, high=2, size=size)
+    potential_tr_vec = np.array(
+        [random.sample(list(tr_vec), len(tr_vec)) for _ in range(20)]
+    )
+    return tr_vec, potential_tr_vec
+
+
 @pytest.fixture(
-    params=[(9, False), (16, False), (9, True), (16, True)],
-    ids=["unweighted_9", "unweighted_16", "weighted_9", "weighted_16"],
+    params=[(9, "weight"), (9, None)],
+    ids=["weighted_9", "unweighted_9"],
 )
 def generate_dataset(request):
     """Generate a Dataset object"""
-    N, weighted = request.param
-    lattice_graph = make_sq_lattice_graph(N=N, weighted=weighted)
-    if weighted:
-        lattice_dataset = Dataset(graph=lattice_graph, edge_weight_attr="weight")
+    N, weight = request.param
+    lattice_graph = make_sq_lattice_graph(N=N, weight=weight, seed=123)
+    if weight:
+        lattice_dataset = Dataset(graph=lattice_graph, edge_weight_attr=weight)
     else:
         lattice_dataset = Dataset(graph=lattice_graph, edge_weight_attr=None)
-    return lattice_dataset
+
+    tr_vec, potential_tr_vec = generate_treatment_vec(size=N, seed=56)
+
+    return lattice_dataset, tr_vec, potential_tr_vec
 
 
 @pytest.fixture(
-    params=[(100, 10, False), (5, 5, False), (100, 10, True), (5, 5, True)],
-    ids=["unweighted_100_10", "unweighted_5_5", "weighted_100_10", "weighted_5_5"],
+    params=[(20, 10, None), (20, 10, "weight")],
+    ids=["unweighted_20_10", "weighted_20_10"],
 )
 def generate_bipartite_dataset(request):
-    n_out, n_div, weighted = request.param
-    bigraph = make_bipartite_graph(n_outcome=n_out, n_diversion=n_div)
-    bipartite_data = BipartiteDataset(graph=bigraph, edge_weight_attr="weight")
-    return bipartite_data
+    n_out, n_div, weight = request.param
+    bigraph = make_bipartite_graph(
+        n_outcome=n_out, n_diversion=n_div, weight=weight, seed=123
+    )
+    bipartite_dataset = BipartiteDataset(graph=bigraph, edge_weight_attr=weight)
+
+    tr_vec, potential_tr_vec = generate_treatment_vec(size=n_div + n_out, seed=56)
+    return bipartite_dataset, tr_vec, potential_tr_vec

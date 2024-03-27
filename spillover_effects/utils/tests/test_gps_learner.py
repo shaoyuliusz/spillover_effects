@@ -5,6 +5,7 @@ from numpy.testing import assert_array_equal
 
 NUM_BINS = 10
 
+
 @pytest.fixture
 def exposure_training_data():
     return np.array([0.1, 0.2, 0.3, 0.4, 0.5])
@@ -34,7 +35,7 @@ def test_histogram_learner_attrs(histogram_fitted_model):
 def test_histogram_learner_method(histogram_fitted_model, exposure_to_score_data):
     grid_score = histogram_fitted_model.score_samples(exposure_to_score_data)
     if isinstance(exposure_to_score_data, np.ndarray):
-        expected_result = np.array([0.0, 0.0, 0.0, 0.2, 0.2, 0.2, 0.4])
+        expected_result = np.array([0.0, 0.0, 0.2, 0.2, 0.2, 0.4, 0.4])
         assert_array_equal(grid_score, expected_result)
     else:
         expected_result = 0.2

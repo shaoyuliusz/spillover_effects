@@ -17,7 +17,7 @@ def test_dataset_summary():
         _ = Dataset(graph=100)
 
     # lattice unweighted graph
-    lattice_graph = make_sq_lattice_graph(N=9, weighted=False)
+    lattice_graph = make_sq_lattice_graph(N=9, weight=None, seed=123)
     lattice_dataset = Dataset(graph=lattice_graph, edge_weight_attr=None)
 
     assert isinstance(lattice_dataset.__str__(), str)
